@@ -1,0 +1,223 @@
+﻿@page "/sqliteWasmBlazor"
+@using global::SqliteWasmBlazor
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.JSObjects
+@implements IAsyncDisposable
+@inject BlazorJSRuntime JS
+@inject IServiceProvider Services
+
+<PageTitle>SqliteWasmBlazor - ADO.NET Sample</PageTitle>
+
+<h1>SqliteWasmBlazor ADO.NET Sample</h1>
+
+<p>This sample demonstrates using SqliteWasmBlazor without Entity Framework Core, using raw ADO.NET.</p>
+
+@if (_errorMessage is not null)
+{
+    <div style="color: red; margin: 1em 0;">
+        <strong>Error:</strong> @_errorMessage
+    </div>
+}
+
+<h2>Users</h2>
+
+<div style="margin: 1em 0;">
+    <input @bind="_newUserName" placeholder="Name" />
+    <input @bind="_newUserEmail" placeholder="Email" />
+    <button @onclick="AddUserAsync">Add User</button>
+</div>
+
+@if (_users.Count == 0)
+{
+    <p><em>No users yet. Add one above!</em></p>
+}
+else
+{
+    <table border="1" cellpadding="8" style="border-collapse: collapse; margin-top: 1em;">
+        <thead>
+            <tr style="background-color: #f0f0f0;">
+                <th>ID</th>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Created At</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var user in _users)
+            {
+                <tr>
+                    <td>@user.Id</td>
+                    <td>@user.Name</td>
+                    <td>@user.Email</td>
+                    <td>@user.CreatedAt.ToString("g")</td>
+                    <td>
+                        <button @onclick="() => DeleteUserAsync(user.Id)">Delete</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+<h2>Database Statistics</h2>
+<ul>
+    <li>Total Users: @_users.Count</li>
+    <li>Database File: SimpleApp.db (stored in OPFS)</li>
+    <li>Using: Raw ADO.NET (no EF Core!)</li>
+</ul>
+
+@code {
+    private SqliteWasmConnection? _connection;
+    private readonly List<User> _users = new();
+    private string? _errorMessage;
+    private string _newUserName = "";
+    private string _newUserEmail = "";
+    private Window? _window;
+    
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _window = JS.Get<Window>("window");
+            _window.OnResize += Window_OnResize;
+
+            // Lazy init - OPFS SAHPool needs exclusive access, so we only init
+            // when this page is actually opened (not globally in Program.cs).
+            // If another window/tab already holds the SAH this will throw
+            // NoModificationAllowedError and be surfaced via _errorMessage.
+            await Services.InitializeSqliteWasmAsync();
+
+            // Create and open connection
+            _connection = new SqliteWasmConnection("Data Source=SimpleApp.db");
+            await _connection.OpenAsync();
+
+            // Create table if not exists
+            await using (var createCmd = _connection.CreateCommand())
+            {
+                createCmd.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS Users (
+                        Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        Name TEXT NOT NULL,
+                        Email TEXT NOT NULL,
+                        CreatedAt TEXT NOT NULL
+                    )";
+                await createCmd.ExecuteNonQueryAsync();
+            }
+
+            // Load existing users
+            await LoadUsersAsync();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Initialization failed: {ex.Message}";
+        }
+    }
+    
+    private async Task LoadUsersAsync()
+    {
+        if (_connection is null)
+        {
+            return;
+        }
+
+        _users.Clear();
+
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT Id, Name, Email, CreatedAt FROM Users ORDER BY CreatedAt DESC";
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            _users.Add(new User
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1),
+                Email = reader.GetString(2),
+                CreatedAt = DateTime.Parse(reader.GetString(3))
+            });
+        }
+    }
+
+    private async Task AddUserAsync()
+    {
+        if (_connection is null || string.IsNullOrWhiteSpace(_newUserName) || string.IsNullOrWhiteSpace(_newUserEmail))
+        {
+            return;
+        }
+
+        try
+        {
+            _errorMessage = null;
+
+            await using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "INSERT INTO Users (Name, Email, CreatedAt) VALUES ($name, $email, $date)";
+
+            cmd.Parameters.Add(new SqliteWasmParameter { ParameterName = "$name", Value = _newUserName });
+            cmd.Parameters.Add(new SqliteWasmParameter { ParameterName = "$email", Value = _newUserEmail });
+            cmd.Parameters.Add(new SqliteWasmParameter { ParameterName = "$date", Value = DateTime.UtcNow.ToString("O") });
+
+            await cmd.ExecuteNonQueryAsync();
+
+            // Clear form
+            _newUserName = "";
+            _newUserEmail = "";
+
+            // Reload users
+            await LoadUsersAsync();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Failed to add user: {ex.Message}";
+        }
+    }
+
+    private async Task DeleteUserAsync(int id)
+    {
+        if (_connection is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _errorMessage = null;
+
+            await using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM Users WHERE Id = $id";
+            cmd.Parameters.Add(new SqliteWasmParameter { ParameterName = "$id", Value = id });
+
+            await cmd.ExecuteNonQueryAsync();
+
+            // Reload users
+            await LoadUsersAsync();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Failed to delete user: {ex.Message}";
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _window?.OnResize -= Window_OnResize;
+        _window?.Dispose();
+        _window = null;
+        
+        if (_connection is not null)
+        {
+            await _connection.CloseAsync();
+            await _connection.DisposeAsync();
+        }
+    }
+
+    private record User
+    {
+        public int Id { get; init; }
+        public string Name { get; init; } = "";
+        public string Email { get; init; } = "";
+        public DateTime CreatedAt { get; init; }
+    }
+    
+    private void Window_OnResize() => Console.WriteLine("Window resized!");
+}

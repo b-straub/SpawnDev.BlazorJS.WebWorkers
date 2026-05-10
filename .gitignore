@@ -364,3 +364,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+.idea
+SpawnDev.BlazorJS.WebWorkers/tasks/netstandard2.0/SpawnDev.BlazorJS.WebWorkers.Build.deps.json
+.DS_Store
